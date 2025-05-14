@@ -6,7 +6,7 @@ require github.com/ethereum/go-ethereum v1.15.11
 
 replace github.com/ethereum/go-ethereum => github.com/ethereum-optimism/op-geth v1.101503.4
 
-require golang.org/x/crypto v0.38.0
+require golang.org/x/crypto v0.38.0 // indirect
 
 require (
 	github.com/BurntSushi/toml v1.4.0 // indirect
