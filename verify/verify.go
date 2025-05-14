@@ -1,146 +1,107 @@
 package verify
 
 import (
-	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"math/big"
-	"net/http"
-	"time"
+	"log"
 
-	"github.com/RootPe/verify-op-txn/trie"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/trie"
+	"github.com/ethereum/go-ethereum/trie/trienode"
 )
 
-type transaction struct {
-	BlockNumberHex   string `json:"blockNumber"`
-	From             string `json:"from"`
-	Hash             string `json:"hash"`
-	Input            string `json:"input"`
-	To               string `json:"to"`
-	TransactionIndex string `json:"transactionIndex"`
+func PrettyPrint(v interface{}) {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err == nil {
+		fmt.Println(string(b))
+	}
 }
 
-type rpcResponse struct {
-	JSONRPC string       `json:"jsonrpc"`
-	ID      int          `json:"id"`
-	Result  *transaction `json:"result,omitempty"`
-	Error   *rpcError    `json:"error,omitempty"`
-}
-
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-func transactionByHash(rpcURL, txnHash string) (*transaction, error) {
-	reqBody := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"method":  "eth_getTransactionByHash",
-		"params":  []interface{}{txnHash},
-		"id":      1,
-	}
-
-	bodyBytes, err := json.Marshal(reqBody)
+func GetTransactionProof(rpcURL string, txHash string) ([][]byte, *types.Header, uint64, error) {
+	ctx := context.Background()
+	client, err := ethclient.DialContext(ctx, rpcURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to connect to RPC: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", rpcURL, bytes.NewBuffer(bodyBytes))
+	// Get the transaction and receipt
+	_, isPending, err := client.TransactionByHash(ctx, common.HexToHash(txHash))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, nil, 0, fmt.Errorf("tx not found: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if isPending {
+		return nil, nil, 0, fmt.Errorf("tx is pending")
+	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	receipt, err := client.TransactionReceipt(ctx, common.HexToHash(txHash))
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to get receipt: %w", err)
 	}
-	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	block, err := client.BlockByHash(ctx, receipt.BlockHash)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to get block: %w", err)
 	}
 
-	var rpcResp rpcResponse
-	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
+	header := block.Header()
+	txs := block.Transactions()
+	PrettyPrint(txs)
+	txIndex := receipt.TransactionIndex
+	fmt.Println("tex", txIndex)
 
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
-	}
-	if rpcResp.Result == nil {
-		return nil, errors.New("transaction not found")
-	}
+	// Build a transaction trie using NewStackTrie
+	txTrie := trie.NewEmpty(nil)
 
-	return rpcResp.Result, nil
-}
+	for i := 0; i < len(txs); i++ {
+		tx := txs[i]
 
-func VerifyTransaction(rpcURL, txnHash string) (*types.Header, [][]byte, uint64, error) {
-	client, err := ethclient.Dial(rpcURL)
-	if err != nil {
-		return nil, [][]byte{}, 0, err
-	}
-	txn, err := transactionByHash(rpcURL, txnHash)
-	if err != nil {
-		return nil, [][]byte{}, 0, err
-	}
-
-	if txn.BlockNumberHex == "" {
-		return nil, [][]byte{}, 0, errors.New("transaction is pending")
-	}
-
-	n := new(big.Int)
-	_, ok := n.SetString(txn.BlockNumberHex[2:], 16)
-	if !ok {
-		return nil, [][]byte{}, 0, errors.New("invalid block number")
-	}
-	b, err := client.BlockByNumber(context.Background(), n)
-	if err != nil {
-		return nil, [][]byte{}, 0, err
-	}
-	txns := b.Transactions()
-
-	type data struct {
-		hash common.Hash
-		blob []byte
-	}
-	kv := make(map[string]data)
-	options := trie.NewStackTrieOptions()
-
-	options.WithWriter(func(path []byte, hash common.Hash, blob []byte) {
-		kv[common.Bytes2Hex(path)] = data{hash, blob}
-	})
-
-	t := trie.NewStackTrie(options)
-	rootHash := trie.DeriveSha(txns, t)
-	if rootHash != b.Header().TxHash {
-		return nil, [][]byte{}, 0, errors.New("trie build error")
-	}
-
-	bi := new(big.Int)
-	bi.SetString(txn.TransactionIndex[2:], 16)
-	k := bi.Uint64()
-	var indexBuf []byte
-	indexBuf = rlp.AppendUint64(indexBuf[:0], k)
-
-	key := trie.KeybytesToHex(indexBuf)
-	pdb := trie.NewProofDB()
-	for i := 0; i < len(key); i++ {
-		data, ok := kv[common.Bytes2Hex(key[:i])]
-		if ok {
-			pdb.Put(data.hash.Bytes(), data.blob)
+		// Build trie key: RLP(index)
+		key, err := rlp.EncodeToBytes(uint(i))
+		if err != nil {
+			log.Fatalf("Failed to encode index %d: %v", i, err)
 		}
+
+		// RLP-encode the transaction itself
+		val, err := tx.MarshalBinary()
+		if err != nil {
+			log.Fatalf("Failed to encode transaction at index %d: %v", i, err)
+		}
+
+		fmt.Println("Index:", i, "Key:", hex.EncodeToString(key), "TxHash:", tx.Hash().Hex(), hex.EncodeToString(val))
+		txTrie.Update(key, val)
 	}
 
-	return b.Header(), pdb.Serialize(), k, nil
+	reconstructedTxRoot := txTrie.Hash()
+	targetTxKey, err := rlp.EncodeToBytes(uint(0))
+	if err != nil {
+		log.Fatalf("Failed to RLP encode target transaction index %d: %v", txIndex, err)
+	}
+	fmt.Println("reconstructedTxRoot", reconstructedTxRoot)
+	proof := new(trienode.ProofList)
+	fmt.Println("targetTxKey", targetTxKey, hex.EncodeToString(targetTxKey))
+	txTrie.Prove(targetTxKey, proof)
+	for i, node := range *proof {
+		fmt.Printf("Node %d: 0x%x\n", i, node)
+		fmt.Println(crypto.Keccak256Hash(node).String())
+	}
+
+	// db := memorydb.New()
+	// for _, node := range *proof {
+	// 	db.Put(crypto.Keccak256Hash(node).Bytes(), node)
+	// }
+
+	// aaa, err := trie.VerifyProof(reconstructedTxRoot, targetTxKey, nil)
+	// if err != nil {
+	// 	log.Fatalf("err %v", err)
+	// }
+	// fmt.Println("aaa", hex.EncodeToString(aaa))
+
+	fmt.Println("reconstructedTxRoot", reconstructedTxRoot)
+	return nil, header, uint64(txIndex), nil
 }

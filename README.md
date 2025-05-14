@@ -11,6 +11,7 @@ type Output struct {
 	Header   interface{} `json:"header"`
 	Proof    []string    `json:"proof"`
 	TxnIndex uint64      `json:"txnIndex"`
+	TxnCount uint64 	 `json:"txnCount"`
 }
 
 func main() {

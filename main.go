@@ -10,9 +10,10 @@ import (
 )
 
 type Output struct {
-	Header   interface{} `json:"header"`
-	Proof    []string    `json:"proof"`
-	TxnIndex uint64      `json:"txnIndex"`
+	Root     string   `json:"root"`
+	Proof    []string `json:"proof"`
+	TxnIndex uint64   `json:"txnIndex"`
+	TxnCount uint64   `json:"txnCount"`
 }
 
 func main() {
@@ -33,7 +34,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	header, proof, txnIndex, err := verify.VerifyTransaction(*rpcURL, *txHash)
+	proof, _, _, err := verify.GetTransactionProof(*rpcURL, *txHash)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Verification error:", err)
 		os.Exit(1)
@@ -45,9 +46,10 @@ func main() {
 	}
 
 	out := Output{
-		Header:   header,
-		Proof:    sproof,
-		TxnIndex: txnIndex,
+		// Root:     header.TxHash.String(),
+		// Proof:    sproof,
+		// TxnIndex: txnIndex,
+		// TxnCount: txnCount,
 	}
 	json.NewEncoder(os.Stdout).Encode(out)
 }
