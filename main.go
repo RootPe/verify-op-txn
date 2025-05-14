@@ -2,31 +2,52 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
+	"os"
 
 	"github.com/RootPe/verify-op-txn/verify"
 )
 
-func PrettyPrint(v interface{}) {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err == nil {
-		fmt.Println(string(b))
-	}
+type Output struct {
+	Header   interface{} `json:"header"`
+	Proof    []string    `json:"proof"`
+	TxnIndex uint64      `json:"txnIndex"`
 }
 
 func main() {
-	const rpcURL = "http://localhost:9545"
-	header, proof, txnIndex, err := verify.VerifyTransaction(rpcURL, "0x5e0262fa74c7c9dc436fedc5f414f7d7ed71bdd54c7cc305a20c09b450783220")
-	if err != nil {
-		fmt.Println(err)
-		return
+	rpcURL := flag.String("rpc", "", "Ethereum RPC URL")
+	txHash := flag.String("tx", "", "Transaction hash to verify")
+
+	flag.Parse()
+
+	if *txHash == "" {
+		fmt.Fprintln(os.Stderr, "Error: -tx flag is required")
+		flag.Usage()
+		os.Exit(1)
 	}
-	PrettyPrint(header)
+
+	if *rpcURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: -rpc flag is required")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	header, proof, txnIndex, err := verify.VerifyTransaction(*rpcURL, *txHash)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Verification error:", err)
+		os.Exit(1)
+	}
+
 	sproof := []string{}
 	for _, b := range proof {
 		sproof = append(sproof, fmt.Sprintf("%x", b))
 	}
-	PrettyPrint(sproof)
-	fmt.Println("txnIndex", txnIndex)
 
+	out := Output{
+		Header:   header,
+		Proof:    sproof,
+		TxnIndex: txnIndex,
+	}
+	json.NewEncoder(os.Stdout).Encode(out)
 }
